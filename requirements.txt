@@ -1,0 +1,4 @@
+streamlit
+lucide-react
+requests
+3. **连接 Streamlit**：登录 [share.streamlit.io](https://share.streamlit.io/)，连接你的 GitHub 仓库并点击 **"Deploy"**。
