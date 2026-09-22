@@ -29,6 +29,11 @@ def _get_secret(name, default=""):
 
 
 SUPABASE_URL = _get_secret("SUPABASE_URL").strip()
+# 规范化 Project URL：去掉结尾斜杠 / 误粘贴的 API 路径，避免请求被路由到错误服务（典型报错 PGRST125）
+SUPABASE_URL = SUPABASE_URL.rstrip("/")
+for _prefix in ("/rest/v1", "/storage/v1", "/auth/v1", "/functions/v1"):
+    if SUPABASE_URL.endswith(_prefix):
+        SUPABASE_URL = SUPABASE_URL[: -len(_prefix)].rstrip("/")
 SUPABASE_KEY = _get_secret("SUPABASE_KEY").strip()
 ADMIN_PWD = _get_secret("ADMIN_PWD", "admin888")
 BUCKET = "materials"        # 公开桶名（在 Supabase Storage 里创建，需开启 Public）
@@ -67,7 +72,7 @@ def _api(method, path, body=None, content_type=None, extra_headers=None):
             raw = resp.read().decode("utf-8", "ignore")
             return resp.status, raw
     except urllib.error.HTTPError as e:
-        raise RuntimeError(f"HTTP {e.code}: {e.read().decode('utf-8', 'ignore')[:200]}")
+        raise RuntimeError(f"{method} {url} → HTTP {e.code}: {e.read().decode('utf-8', 'ignore')[:200]}")
 
 
 def public_url(path):
