@@ -3,6 +3,8 @@ import os
 import json
 import time
 import urllib.request
+import urllib.parse
+import urllib.error
 from datetime import datetime
 
 # --- 1. 基础配置 ---
@@ -40,34 +42,47 @@ for d in [DATA_DIR, UPLOAD_DIR]:
     if not os.path.exists(d):
         os.makedirs(d)
 
-# 初始化 Supabase 客户端（未配置密钥时自动退回本地临时模式）
+# 直接使用 Supabase REST API（不依赖 supabase 库，避免版本兼容问题）
 USE_SUPABASE = bool(SUPABASE_URL and SUPABASE_KEY)
-_sb = None
-if USE_SUPABASE:
-    try:
-        from supabase import create_client
-        _sb = create_client(SUPABASE_URL, SUPABASE_KEY)
-    except Exception as e:
-        _sb = None
-        USE_SUPABASE = False
-        st.warning(f"⚠️ Supabase 客户端初始化失败，已退回本地临时模式：{e}")
 
 if not USE_SUPABASE:
     st.info("ℹ️ 尚未配置 Supabase（Secrets 缺少 SUPABASE_URL / SUPABASE_KEY），当前为本地临时模式，数据会在应用重启后丢失。详见《Supabase接入说明》。")
 
 
 # --- 2. 数据处理函数（优先 Supabase，失败时退回本地） ---
+def _api(method, path, body=None, content_type=None, extra_headers=None):
+    """调用 Supabase REST API（PostgREST / Storage），全部走标准 HTTP"""
+    url = f"{SUPABASE_URL}/{path}"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+    }
+    if content_type:
+        headers["Content-Type"] = content_type
+    if extra_headers:
+        headers.update(extra_headers)
+    req = urllib.request.Request(url, method=method, data=body, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8", "ignore")
+            return resp.status, raw
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"HTTP {e.code}: {e.read().decode('utf-8', 'ignore')[:200]}")
+
+
 def public_url(path):
-    """根据存储路径生成 Supabase 公开下载地址"""
-    return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{path}"
+    """根据存储路径生成 Supabase 公开下载地址（文件名含中文时需 URL 编码）"""
+    quoted = urllib.parse.quote(path, safe="/")
+    return f"{SUPABASE_URL}/storage/v1/object/public/{BUCKET}/{quoted}"
 
 
 def load_data():
     if USE_SUPABASE:
         try:
-            res = _sb.table("app_data").select("value").eq("key", DATA_KEY).limit(1).execute()
-            if res.data:
-                return json.loads(res.data[0]["value"])
+            status, raw = _api("GET", f"rest/v1/app_data?select=value&key=eq.{DATA_KEY}")
+            rows = json.loads(raw) if raw else []
+            if rows:
+                return json.loads(rows[0]["value"])
             return []
         except Exception:
             pass  # 读取失败时退回本地，避免页面崩溃
@@ -81,9 +96,13 @@ def load_data():
 def save_data(data):
     if USE_SUPABASE:
         try:
-            _sb.table("app_data").upsert(
-                {"key": DATA_KEY, "value": json.dumps(data, ensure_ascii=False)}
-            ).execute()
+            _api(
+                "POST",
+                f"rest/v1/app_data?on_conflict=key",
+                body=json.dumps({"key": DATA_KEY, "value": json.dumps(data, ensure_ascii=False)}).encode("utf-8"),
+                content_type="application/json",
+                extra_headers={"Prefer": "resolution=merge-duplicates,return=minimal"},
+            )
             return
         except Exception as e:
             st.error(f"保存到 Supabase 失败：{e}，已退回本地临时保存")
@@ -96,10 +115,12 @@ def upload_file(post_id, f):
     if USE_SUPABASE:
         try:
             f_path = f"uploads/{post_id}/{f.name}"   # 按动态 id 分组，避免同名覆盖
-            _sb.storage.from_(BUCKET).upload(
-                f_path,
-                f.getvalue(),
-                {"content-type": f.type or "application/octet-stream"},
+            quoted = urllib.parse.quote(f_path, safe="/")
+            _api(
+                "POST",
+                f"storage/v1/object/{BUCKET}/{quoted}",
+                body=f.getvalue(),
+                content_type=f.type or "application/octet-stream",
             )
             return {
                 "name": f.name,
@@ -320,11 +341,12 @@ else:
                         if USE_SUPABASE:
                             # 删除 Supabase 里的文件（含历史兼容：无 path 的旧数据跳过）
                             paths = [f["path"] for f in p["files"] if f.get("path")]
-                            if paths:
+                            for path in paths:
                                 try:
-                                    _sb.storage.from_(BUCKET).remove(paths)
+                                    quoted = urllib.parse.quote(path, safe="/")
+                                    _api("DELETE", f"storage/v1/object/{BUCKET}/{quoted}")
                                 except Exception as e:
-                                    st.warning(f"删除云端文件失败：{e}")
+                                    st.warning(f"删除云端文件 {path} 失败：{e}")
                             _fetch_file.clear()
                         else:
                             # 本地临时模式：物理删除文件
